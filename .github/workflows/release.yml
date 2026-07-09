@@ -98,16 +98,36 @@ jobs:
           security set-keychain-settings -lut 21600 $KEYCHAIN_PATH
           security unlock-keychain -p "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
 
-          security import $CERT_PATH -P "$APPLE_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k $KEYCHAIN_PATH
+          # No -t cert: the p12 carries the private key too, and typing
+          # it as a bare certificate can drop the key half — without the
+          # key there is no signing identity at all.
+          security import $CERT_PATH -P "$APPLE_CERTIFICATE_PASSWORD" -A -f pkcs12 -k $KEYCHAIN_PATH
           security set-key-partition-list -S apple-tool:,apple: -k "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
           security list-keychain -d user -s $KEYCHAIN_PATH
+
+          # GitHub runners don't ship Apple's intermediate CAs; without
+          # them the imported identity fails validation and
+          # find-identity -v reports nothing. Best-effort import.
+          for ca in DeveloperIDG2CA AppleWWDRCAG3 AppleWWDRCAG4; do
+            curl -fsSo "$RUNNER_TEMP/$ca.cer" "https://www.apple.com/certificateauthority/$ca.cer" \
+              && security import "$RUNNER_TEMP/$ca.cer" -k $KEYCHAIN_PATH -t cert -A \
+              || echo "note: intermediate $ca not imported"
+          done
+
+          echo "Certificates in keychain:"
+          security find-certificate -a $KEYCHAIN_PATH | sed -n 's/.*"labl"<blob>="\(.*\)"/  - \1/p'
+          echo "All identities (including invalid):"
+          security find-identity -p codesigning $KEYCHAIN_PATH || true
 
           # Derive the signing identity from the imported certificate so
           # an APPLE_SIGNING_IDENTITY secret is not required.
           IDENTITY=$(security find-identity -v -p codesigning "$KEYCHAIN_PATH" \
             | sed -n 's/.*"\(.*\)"/\1/p' | head -1)
           if [ -z "$IDENTITY" ]; then
-            echo "No codesigning identity found in the imported certificate" >&2
+            echo "No VALID codesigning identity in the imported certificate." >&2
+            echo "If identities are listed above but not valid, the cert chain is incomplete." >&2
+            echo "If none are listed at all, the exported .p12 is missing the private key" >&2
+            echo "or is not a Developer ID Application / Apple Development certificate." >&2
             exit 1
           fi
           echo "Using signing identity: $IDENTITY"
