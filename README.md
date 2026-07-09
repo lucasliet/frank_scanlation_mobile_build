@@ -15,6 +15,19 @@
 
 ---
 
+## What it looks like
+
+Your library: paste a site URL, get a card with cover art, reading
+status, and a NEW badge when unread chapters land.
+
+![Library grid with manga cover cards, reading progress, and Continue buttons](docs/screenshots/library.webp)
+
+Reading: the site opens in place with the Prettify Manga Reader overlay
+injected — here a double-page spread, fitted to a maximized window,
+with the ⌂ Library button to get back home.
+
+![Reader overlay showing a joined two-page manga spread in a dark full-screen layout](docs/screenshots/reader.webp)
+
 ## What it is
 
 Scanlation sites are ad-bloated, bright, one-long-scroll pages. This app is
