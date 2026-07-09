@@ -1,3 +1,5 @@
+// @ts-nocheck — plain node:test file evaluated outside the SvelteKit
+// TS project; the vm harness is intentionally untyped.
 // Tests for the injected reader script, run with `node --test`.
 //
 // The harness mirrors the Prettify Manga Reader extension's test setup:
