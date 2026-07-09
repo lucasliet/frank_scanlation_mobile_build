@@ -4,7 +4,10 @@ html.pmr-reader-active body {
 }
 
 html.pmr-reader-active body > * {
-  content-visibility: hidden !important;
+  /* The extension also sets content-visibility: hidden here, but that
+     containment path makes WebKitGTK on NVIDIA stop painting the
+     overlay after scrolling at large window sizes. visibility alone
+     already skips painting the suspended page. */
   pointer-events: none !important;
   visibility: hidden !important;
 }
@@ -44,7 +47,7 @@ html.pmr-reader-active body > * {
   overflow-x: hidden !important;
   overflow-y: auto !important;
   overscroll-behavior: contain !important;
-  scroll-behavior: smooth !important;
+  scroll-behavior: auto !important;
   scroll-snap-type: y mandatory !important;
   background:
     radial-gradient(circle at 50% 0%, rgba(255, 255, 255, 0.055), transparent 34rem),
@@ -179,8 +182,6 @@ html.pmr-kindle-night-3 .pmr-kindle-page-surface {
   color: #f7f7f7 !important;
   text-align: center !important;
   box-shadow: 0 22px 70px rgba(0, 0, 0, 0.46) !important;
-  backdrop-filter: blur(16px) saturate(130%) !important;
-  -webkit-backdrop-filter: blur(16px) saturate(130%) !important;
 }
 
 #pmr-reader-root .pmr-chapter-nav-card h2 {
@@ -230,8 +231,6 @@ html.pmr-kindle-night-3 .pmr-kindle-page-surface {
   background: rgba(18, 18, 18, 0.72) !important;
   color: #f7f7f7 !important;
   box-shadow: 0 12px 34px rgba(0, 0, 0, 0.34) !important;
-  backdrop-filter: blur(14px) saturate(130%) !important;
-  -webkit-backdrop-filter: blur(14px) saturate(130%) !important;
   opacity: 0.88 !important;
   transition: opacity 160ms ease, transform 160ms ease !important;
 }
@@ -251,11 +250,9 @@ html.pmr-kindle-night-3 .pmr-kindle-page-surface {
   padding: 5px !important;
   border: 1px solid rgba(255, 255, 255, 0.14) !important;
   border-radius: 999px !important;
-  background: rgba(14, 14, 14, 0.58) !important;
+  background: rgba(14, 14, 14, 0.88) !important;
   color: #f8f8f8 !important;
   box-shadow: 0 10px 30px rgba(0, 0, 0, 0.28) !important;
-  backdrop-filter: blur(12px) saturate(125%) !important;
-  -webkit-backdrop-filter: blur(12px) saturate(125%) !important;
   opacity: 0.62 !important;
   transition: opacity 160ms ease !important;
 }
@@ -277,11 +274,9 @@ html.pmr-kindle-night-3 .pmr-kindle-page-surface {
   padding: 5px !important;
   border: 1px solid rgba(255, 255, 255, 0.14) !important;
   border-radius: 999px !important;
-  background: rgba(14, 14, 14, 0.58) !important;
+  background: rgba(14, 14, 14, 0.88) !important;
   color: #f8f8f8 !important;
   box-shadow: 0 10px 30px rgba(0, 0, 0, 0.28) !important;
-  backdrop-filter: blur(12px) saturate(125%) !important;
-  -webkit-backdrop-filter: blur(12px) saturate(125%) !important;
   opacity: 0.56 !important;
   transition: opacity 160ms ease, transform 160ms ease !important;
 }
@@ -420,8 +415,6 @@ html.pmr-kindle-night-3 .pmr-kindle-page-surface {
   background: rgba(18, 18, 18, 0.64) !important;
   color: #fff !important;
   box-shadow: 0 12px 34px rgba(0, 0, 0, 0.28) !important;
-  backdrop-filter: blur(14px) saturate(130%) !important;
-  -webkit-backdrop-filter: blur(14px) saturate(130%) !important;
   opacity: 0.78 !important;
 }
 

@@ -186,6 +186,9 @@
   let mutationObserver = null;
   let activatorRefreshTimer = 0;
   let scrollRaf = 0;
+  let rasterNudgeTimer = 0;
+  let rasterNudgeTick = false;
+  let lastRasterNudgeAt = 0;
   let layoutRefreshTimer = 0;
   let kindleHandlerActive = false;
   let kindleToolbar = null;
@@ -1116,6 +1119,7 @@
     });
     scrollEl.addEventListener("scroll", handleReaderScroll, { passive: true });
     document.addEventListener("keydown", handleKeyDown, true);
+    window.addEventListener("resize", handleReaderResize, { passive: true });
 
     renderSpreads(readerData.targetPageIndex || 0);
     scrollEl.focus({ preventScroll: true });
@@ -1128,6 +1132,8 @@
     active = false;
     readerClosedByUser = true;
     window.clearTimeout(layoutRefreshTimer);
+    window.clearTimeout(rasterNudgeTimer);
+    window.removeEventListener("resize", handleReaderResize);
     chapterNav = null;
     currentMangaKey = "";
     document.removeEventListener("keydown", handleKeyDown, true);
@@ -1386,9 +1392,25 @@
 
     updateRootClasses();
     const nextSpreadIndex = findSpreadForPage(targetPageIndex);
+    markSpreadsNearTargetEager(nextSpreadIndex);
     currentSpreadIndex = nextSpreadIndex;
     updateToolbar();
     requestAnimationFrame(() => goToSpread(nextSpreadIndex, "auto"));
+    scheduleRasterNudge(150);
+  }
+
+  function markSpreadsNearTargetEager(targetSpreadIndex) {
+    if (!scrollEl) {
+      return;
+    }
+    Array.from(scrollEl.children).forEach((section, spreadIndex) => {
+      if (Math.abs(spreadIndex - targetSpreadIndex) > 1) {
+        return;
+      }
+      section.querySelectorAll("img").forEach((image) => {
+        image.loading = "eager";
+      });
+    });
   }
 
   function buildSpreads(mode, pageList) {
@@ -1627,7 +1649,7 @@
     return Math.max(0, Math.min(currentSpreadIndex, spreads.length - 1));
   }
 
-  function goToSpread(index, behavior = "smooth") {
+  function goToSpread(index, behavior = "instant") {
     if (!scrollEl || spreads.length === 0) {
       return;
     }
@@ -1639,9 +1661,45 @@
     currentSpreadIndex = next;
     updateToolbar();
     scrollEl.scrollTo({ top: child.offsetTop, behavior });
+    scheduleRasterNudge();
+  }
+
+  // WebKitGTK on NVIDIA stops rasterizing content that scrolls into
+  // view inside the overlay at large window sizes — layout is correct,
+  // images are loaded, the tiles just never paint. Any real style
+  // invalidation forces the visible viewport to rasterize, so after
+  // every scroll/resize we "nudge" the page images with an alternating,
+  // imperceptible transform. Harmless on healthy renderers.
+  function nudgeRasterization() {
+    if (!active || !scrollEl) {
+      return;
+    }
+    lastRasterNudgeAt = Date.now();
+    rasterNudgeTick = !rasterNudgeTick;
+    const transform = `translateZ(0) scale(${rasterNudgeTick ? "1.0001" : "1.0002"})`;
+    scrollEl.querySelectorAll(".pmr-page img, .pmr-chapter-nav-card").forEach((el) => {
+      el.style.transform = transform;
+    });
+  }
+
+  function scheduleRasterNudge(delay = 100) {
+    window.clearTimeout(rasterNudgeTimer);
+    rasterNudgeTimer = window.setTimeout(nudgeRasterization, delay);
+  }
+
+  function handleReaderResize() {
+    if (active) {
+      scheduleRasterNudge(150);
+    }
   }
 
   function handleReaderScroll() {
+    // Throttled leading nudge so continuous wheel scrolling keeps
+    // painting, plus a trailing one for wherever the scroll settles.
+    if (Date.now() - lastRasterNudgeAt > 120) {
+      nudgeRasterization();
+    }
+    scheduleRasterNudge();
     if (scrollRaf) {
       return;
     }
