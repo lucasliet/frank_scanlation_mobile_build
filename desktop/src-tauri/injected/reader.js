@@ -1677,8 +1677,15 @@
     lastRasterNudgeAt = Date.now();
     rasterNudgeTick = !rasterNudgeTick;
     const transform = `translateZ(0) scale(${rasterNudgeTick ? "1.0001" : "1.0002"})`;
-    scrollEl.querySelectorAll(".pmr-page img, .pmr-chapter-nav-card").forEach((el) => {
-      el.style.transform = transform;
+    // Only spreads near the viewport: invalidating every image in a
+    // long chapter makes each nudge needlessly expensive.
+    Array.from(scrollEl.children).forEach((section, spreadIndex) => {
+      if (Math.abs(spreadIndex - currentSpreadIndex) > 2) {
+        return;
+      }
+      section.querySelectorAll("img, .pmr-chapter-nav-card").forEach((el) => {
+        el.style.transform = transform;
+      });
     });
   }
 
