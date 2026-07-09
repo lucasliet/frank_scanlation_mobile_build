@@ -1,10 +1,12 @@
 //! FRANK Scanlation desktop app.
 //!
-//! The main window is the SvelteKit library UI. Each manga opens in its
-//! own reader window pointed directly at the scanlation site, with the
-//! ported Prettify Manga Reader script injected on every page. Reading
-//! progress is tracked entirely on the Rust side by watching page loads
-//! in that window — remote pages never get IPC access.
+//! Single-window design: the one main window shows the SvelteKit
+//! library UI and navigates directly to scanlation sites for reading,
+//! with the ported Prettify Manga Reader script injected on every
+//! remote page (plus a floating "⌂ Library" button whose magic-URL
+//! navigation the Rust side intercepts to return home). Reading
+//! progress is tracked entirely on the Rust side by watching page
+//! loads — remote pages never get IPC access.
 
 // GPU + display-server detection and WebKit render-mode policy, taken
 // from FRANK MANGA+ where it was battle-tested against the Wayland/EGL
@@ -30,9 +32,23 @@ const CHECK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(6 * 6
 /// stays snappy and the UI is already interactive.
 const FIRST_CHECK_DELAY: std::time::Duration = std::time::Duration::from_secs(5);
 
+/// Host of the magic URL the injected home button navigates to. The
+/// main window's on_navigation hook intercepts it and swaps the app UI
+/// back in — the only signal a remote page can send without IPC.
+const HOME_SIGNAL_HOST: &str = "home.frank-scanlation.internal";
+
 struct AppState {
     library: Arc<Mutex<Library>>,
     fetcher: Fetcher,
+    /// Origins that are the app's own UI (tauri://localhost and the dev
+    /// server). The injected script does nothing on these.
+    app_origins: Vec<String>,
+    /// The manga whose site the single main window currently shows;
+    /// page loads are recorded against it. None while on the library UI.
+    current_manga: Mutex<Option<i64>>,
+    /// Where "home" navigates back to (captured from the main window's
+    /// initial app URL).
+    home_url: Mutex<Option<Url>>,
 }
 
 /// XDG-style config dir holding the library DB and cover cache.
@@ -64,12 +80,56 @@ fn reader_init_script() -> String {
     format!("window.__FRANK_READER_CSS__ = {css_json};\n{JS}")
 }
 
-fn reader_label(manga_id: i64) -> String {
-    format!("reader-{manga_id}")
+fn is_home_signal(url: &Url) -> bool {
+    url.host_str() == Some(HOME_SIGNAL_HOST)
 }
 
-fn manga_id_from_label(label: &str) -> Option<i64> {
-    label.strip_prefix("reader-")?.parse().ok()
+/// Origins the app UI is served from: the bundled-asset origins plus
+/// the dev server when running under `tauri dev`.
+fn app_origins(dev_url: Option<&Url>) -> Vec<String> {
+    let mut origins = vec![
+        "tauri://localhost".to_string(),
+        "http://tauri.localhost".to_string(),
+        "https://tauri.localhost".to_string(),
+    ];
+    if let Some(dev) = dev_url {
+        origins.push(dev.origin().ascii_serialization());
+    }
+    origins
+}
+
+fn is_app_origin(url: &Url, origins: &[String]) -> bool {
+    // tauri:// is a non-special scheme for the url crate (opaque
+    // origin), so match it by scheme instead of serialized origin.
+    if url.scheme() == "tauri" {
+        return true;
+    }
+    let port = url.port().map(|p| format!(":{p}")).unwrap_or_default();
+    let origin = format!(
+        "{}://{}{port}",
+        url.scheme(),
+        url.host_str().unwrap_or_default()
+    );
+    origins.contains(&origin)
+}
+
+/// A navigation only counts as reading progress for the current manga
+/// when it stays on that manga's site — otherwise following an ad or an
+/// off-site link would corrupt the reading state.
+fn same_site(manga: &Manga, url: &Url) -> bool {
+    let host = url.host_str();
+    if host.is_none() {
+        return false;
+    }
+    [
+        Some(&manga.url),
+        manga.latest_chapter_url.as_ref(),
+        manga.last_read_url.as_ref(),
+    ]
+    .into_iter()
+    .flatten()
+    .filter_map(|u| Url::parse(u).ok())
+    .any(|known| known.host_str() == host)
 }
 
 /// Chapter number to record for a navigation, if any. Explicit chapter
@@ -306,63 +366,89 @@ async fn open_manga(
     let open_url = resolve_open_url(&manga, &target, site.as_ref());
     let url = Url::parse(&open_url).map_err(|e| format!("bad target url: {e}"))?;
 
-    // Webview windows must be created on the main (GTK) thread; async
-    // commands run on a worker thread, so dispatch and await the result.
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    let app_handle = app.clone();
-    let title = manga.title.clone();
-    app.run_on_main_thread(move || {
-        let _ = tx.send(open_reader_window(&app_handle, id, &title, url));
-    })
-    .map_err(|e| e.to_string())?;
-    rx.await
-        .map_err(|e| format!("window creation dropped: {e}"))?
+    if let Ok(mut current) = state.current_manga.lock() {
+        *current = Some(id);
+    }
+    navigate_main_window(&app, url).await
 }
 
-/// Navigate the manga's existing reader window, or create it. Must run
-/// on the main thread.
-fn open_reader_window(app: &AppHandle, id: i64, title: &str, url: Url) -> Result<(), String> {
-    let label = reader_label(id);
-    if let Some(window) = app.get_webview_window(&label) {
-        window.navigate(url).map_err(|e| e.to_string())?;
-        let _ = window.set_focus();
-        return Ok(());
+/// Point the single main window at `url`. Webview operations belong on
+/// the main (GTK) thread; async commands run on a worker, so dispatch
+/// and await the result over a oneshot channel.
+async fn navigate_main_window(app: &AppHandle, url: Url) -> Result<(), String> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let app_handle = app.clone();
+    app.run_on_main_thread(move || {
+        let result = app_handle
+            .get_webview_window("main")
+            .ok_or_else(|| "main window missing".to_string())
+            .and_then(|window| window.navigate(url).map_err(|e| e.to_string()));
+        let _ = tx.send(result);
+    })
+    .map_err(|e| e.to_string())?;
+    rx.await.map_err(|e| format!("navigation dropped: {e}"))?
+}
+
+/// Navigate the main window back to the library UI. Callable from any
+/// thread; used by the home-signal interception.
+fn go_home(app: &AppHandle) {
+    let app = app.clone();
+    let _ = app.clone().run_on_main_thread(move || {
+        let state: State<'_, AppState> = app.state();
+        if let Ok(mut current) = state.current_manga.lock() {
+            *current = None;
+        }
+        let home = state.home_url.lock().ok().and_then(|g| g.clone());
+        let Some(home) = home else {
+            eprintln!("[frank-scanlation] go_home: no home url captured");
+            return;
+        };
+        if let Some(window) = app.get_webview_window("main") {
+            if let Err(e) = window.navigate(home) {
+                eprintln!("[frank-scanlation] go_home: navigate failed: {e}");
+            }
+        }
+    });
+}
+
+/// Page-load hook for the main window: back on the app UI, remember the
+/// home URL and clear the current manga; on a manga's site, record
+/// reading progress parsed from the URL.
+fn handle_main_page_load(window: &tauri::WebviewWindow, url: &Url) {
+    let app = window.app_handle();
+    let state: State<'_, AppState> = app.state();
+
+    if is_app_origin(url, &state.app_origins) {
+        if let Ok(mut home) = state.home_url.lock() {
+            *home = Some(url.clone());
+        }
+        if let Ok(mut current) = state.current_manga.lock() {
+            *current = None;
+        }
+        return;
     }
 
-    let init_script = reader_init_script();
-    WebviewWindowBuilder::new(app, &label, WebviewUrl::External(url))
-        .title(title)
-        .inner_size(1280.0, 960.0)
-        .initialization_script(init_script.as_str())
-        .on_page_load(|window, payload| {
-            if !matches!(payload.event(), PageLoadEvent::Finished) {
-                return;
+    let Some(id) = state.current_manga.lock().ok().and_then(|g| *g) else {
+        return;
+    };
+    let recorded = with_library(&state, |lib| {
+        let Some(manga) = lib.get(id)? else {
+            return Ok(false);
+        };
+        if !same_site(&manga, url) {
+            return Ok(false);
+        }
+        match chapter_for_navigation(&manga, url) {
+            Some(chapter) => {
+                lib.record_read(id, url.as_str(), Some(chapter))?;
+                Ok(true)
             }
-            let Some(id) = manga_id_from_label(window.label()) else {
-                return;
-            };
-            let url = payload.url().clone();
-            let app = window.app_handle();
-            let state: State<'_, AppState> = app.state();
-            let recorded = with_library(&state, |lib| {
-                let Some(manga) = lib.get(id)? else {
-                    return Ok(false);
-                };
-                match chapter_for_navigation(&manga, &url) {
-                    Some(chapter) => {
-                        lib.record_read(id, url.as_str(), Some(chapter))?;
-                        Ok(true)
-                    }
-                    None => Ok(false),
-                }
-            });
-            if recorded.unwrap_or(false) {
-                let _ = app.emit("library-updated", ());
-            }
-        })
-        .build()
-        .map_err(|e| e.to_string())?;
-    Ok(())
+            None => Ok(false),
+        }
+    });
+    if recorded.unwrap_or(false) {
+        let _ = app.emit("library-updated", ());
+    }
 }
 
 #[tauri::command]
@@ -497,9 +583,15 @@ pub fn run() {
     let library = Arc::new(Mutex::new(library));
     let fetcher = Fetcher::new();
 
+    let context: tauri::Context<tauri::Wry> = tauri::generate_context!();
+    let origins = app_origins(context.config().build.dev_url.as_ref());
+
     let state = AppState {
         library: library.clone(),
         fetcher: fetcher.clone(),
+        app_origins: origins.clone(),
+        current_manga: Mutex::new(None),
+        home_url: Mutex::new(None),
     };
 
     tauri::Builder::default()
@@ -507,6 +599,47 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .manage(state)
         .setup(move |app| {
+            // The single main window is created here (not in
+            // tauri.conf.json) because it needs the injected reader
+            // script and the navigation/page-load hooks — it shows the
+            // library UI and the scanlation sites in the same webview.
+            let init_script = format!(
+                "window.__FRANK_APP_ORIGINS__ = {};\n{}",
+                serde_json::to_string(&origins).expect("origins serialize"),
+                reader_init_script()
+            );
+            let nav_handle = app.handle().clone();
+            let window =
+                WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
+                    .title("FRANK Scanlation")
+                    .inner_size(1100.0, 780.0)
+                    .min_inner_size(640.0, 480.0)
+                    .initialization_script(init_script.as_str())
+                    .on_navigation(move |url| {
+                        if is_home_signal(url) {
+                            // Deny the fake navigation, then swap the app UI in.
+                            // navigate() can't be called re-entrantly from the
+                            // policy callback, so hop through another thread.
+                            let handle = nav_handle.clone();
+                            std::thread::spawn(move || go_home(&handle));
+                            return false;
+                        }
+                        true
+                    })
+                    .on_page_load(|window, payload| {
+                        if matches!(payload.event(), PageLoadEvent::Finished) {
+                            handle_main_page_load(&window, payload.url());
+                        }
+                    })
+                    .build()?;
+
+            // Baseline home target; on_page_load keeps it current.
+            if let Ok(url) = window.url() {
+                if let Ok(mut home) = app.state::<AppState>().home_url.lock() {
+                    *home = Some(url);
+                }
+            }
+
             spawn_update_checker(app.handle().clone(), library, fetcher);
             Ok(())
         })
@@ -519,7 +652,7 @@ pub fn run() {
             open_manga,
             check_updates,
         ])
-        .run(tauri::generate_context!())
+        .run(context)
         .expect("error while running tauri application");
 }
 
@@ -560,10 +693,57 @@ mod tests {
     }
 
     #[test]
-    fn reader_labels_roundtrip() {
-        assert_eq!(manga_id_from_label(&reader_label(42)), Some(42));
-        assert_eq!(manga_id_from_label("main"), None);
-        assert_eq!(manga_id_from_label("reader-x"), None);
+    fn home_signal_matches_only_magic_host() {
+        assert!(is_home_signal(
+            &Url::parse("https://home.frank-scanlation.internal/").unwrap()
+        ));
+        assert!(!is_home_signal(
+            &Url::parse("https://zom.example/").unwrap()
+        ));
+        assert!(!is_home_signal(
+            &Url::parse("https://frank-scanlation.internal/").unwrap()
+        ));
+    }
+
+    #[test]
+    fn app_origins_cover_bundled_and_dev() {
+        let dev = Url::parse("http://localhost:1420/").unwrap();
+        let origins = app_origins(Some(&dev));
+        assert!(origins.contains(&"tauri://localhost".to_string()));
+        assert!(origins.contains(&"http://localhost:1420".to_string()));
+
+        assert!(is_app_origin(
+            &Url::parse("http://localhost:1420/library").unwrap(),
+            &origins
+        ));
+        assert!(is_app_origin(
+            &Url::parse("tauri://localhost/index.html").unwrap(),
+            &origins
+        ));
+        assert!(!is_app_origin(
+            &Url::parse("https://zom.example/manga/ch-1/").unwrap(),
+            &origins
+        ));
+    }
+
+    #[test]
+    fn same_site_gates_progress_recording() {
+        let mut m = manga(1);
+        assert!(same_site(
+            &m,
+            &Url::parse("https://zom.example/manga/zom-chapter-2/").unwrap()
+        ));
+        assert!(!same_site(
+            &m,
+            &Url::parse("https://ads.example/click").unwrap()
+        ));
+
+        // A known chapter URL on another subdomain extends the site.
+        m.latest_chapter_url = Some("https://w4.zom.example/manga/zom-chapter-9/".into());
+        assert!(same_site(
+            &m,
+            &Url::parse("https://w4.zom.example/manga/zom-chapter-10/").unwrap()
+        ));
     }
 
     #[test]

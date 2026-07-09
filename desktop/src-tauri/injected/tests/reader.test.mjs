@@ -28,7 +28,7 @@ function makeLocalStorage(initial = {}) {
   };
 }
 
-function loadApi({ localStorage, css } = {}) {
+function loadApi({ localStorage, css, appOrigins, origin } = {}) {
   const code = fs.readFileSync(new URL("../reader.js", import.meta.url), "utf8");
   class FakeElement {}
   class FakeMutationObserver {
@@ -44,7 +44,7 @@ function loadApi({ localStorage, css } = {}) {
     MutationObserver: FakeMutationObserver,
     location: {
       href: "https://example.test/manga/series-chapter-10/",
-      origin: "https://example.test",
+      origin: origin || "https://example.test",
       pathname: "/manga/series-chapter-10/",
       search: ""
     },
@@ -68,12 +68,22 @@ function loadApi({ localStorage, css } = {}) {
         return [];
       },
       createElement(tag) {
-        return { tagName: tag, remove() {}, appendChild() {} };
+        return {
+          tagName: tag,
+          innerHTML: "",
+          remove() {},
+          appendChild() {},
+          addEventListener() {},
+          querySelector() {
+            return null;
+          }
+        };
       },
       title: "Series Chapter 10"
     },
     window: {
       __PMR_ENABLE_TEST_API__: true,
+      __FRANK_APP_ORIGINS__: appOrigins,
       __FRANK_READER_CSS__: css,
       localStorage,
       addEventListener() {},
@@ -83,7 +93,7 @@ function loadApi({ localStorage, css } = {}) {
   };
   vm.createContext(context);
   vm.runInContext(code, context, { filename: "reader.js" });
-  return { api: context.window.__PMR_TEST_API__, createdElements };
+  return { api: context.window.__PMR_TEST_API__, createdElements, context };
 }
 
 test("test api is exposed", () => {
@@ -238,4 +248,26 @@ test("page navigation at chapter end flips to next chapter", () => {
 
   const mid = api.pageNavigationIntentFromKey(" ", false, 0, spreads);
   assert.deepEqual(plain(mid), { type: "spread", delta: 1 });
+});
+
+test("script stands down entirely on the app's own UI origins", () => {
+  const { api, createdElements } = loadApi({
+    appOrigins: ["https://example.test", "tauri://localhost"]
+  });
+  assert.equal(api, undefined);
+  assert.equal(createdElements.length, 0);
+});
+
+test("home pill is created on site pages", () => {
+  const { createdElements } = loadApi();
+  const pill = createdElements.find((el) => el.id === "pmr-home-button");
+  assert.ok(pill, "expected the #pmr-home-button container");
+  assert.match(pill.innerHTML, /Library/);
+});
+
+test("goHome navigates to the rust-intercepted home signal url", () => {
+  const { api, context } = loadApi();
+  api.goHome();
+  assert.equal(context.location.href, api.HOME_SIGNAL_URL);
+  assert.match(api.HOME_SIGNAL_URL, /home\.frank-scanlation\.internal/);
 });

@@ -6,6 +6,59 @@
   }
   window.__PRETTIFY_MANGA_READER_LOADED__ = true;
 
+  // Single-window app: this script is injected into every page of the
+  // main window, including the library UI itself. The Rust side tells
+  // us which origins are the app; there we do nothing at all.
+  const FRANK_APP_ORIGINS = Array.isArray(window.__FRANK_APP_ORIGINS__) ? window.__FRANK_APP_ORIGINS__ : [];
+  if (FRANK_APP_ORIGINS.includes(location.origin)) {
+    return;
+  }
+
+  // Navigating to this URL is the "take me back to the library" signal;
+  // the Rust on_navigation hook intercepts it and swaps in the app UI.
+  const HOME_SIGNAL_URL = "https://home.frank-scanlation.internal/";
+  const HOME_BUTTON_ID = "pmr-home-button";
+
+  function goHome() {
+    location.href = HOME_SIGNAL_URL;
+  }
+
+  function ensureHomeButton() {
+    if (!document.documentElement) {
+      return;
+    }
+    let container = document.getElementById(HOME_BUTTON_ID);
+    if (!container) {
+      container = document.createElement("div");
+      container.id = HOME_BUTTON_ID;
+      container.innerHTML = '<button class="pmr-button" type="button" title="Back to your library (h)">⌂ Library</button>';
+      container.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        goHome();
+      });
+    }
+    // (Re-)append so it stacks above the reader overlay, which shares
+    // the maximum z-index and would otherwise cover it.
+    document.documentElement.appendChild(container);
+  }
+
+  function handleHomeKeyDown(event) {
+    if (event.key !== "h" && event.key !== "H") {
+      return;
+    }
+    if (event.ctrlKey || event.altKey || event.metaKey || isEditableTarget(event.target)) {
+      return;
+    }
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    goHome();
+  }
+
+  document.addEventListener("keydown", handleHomeKeyDown, true);
+  ensureHomeButton();
+  document.addEventListener("DOMContentLoaded", ensureHomeButton, { once: true });
+
   // Running inside the FRANK Scanlation Tauri webview, not a browser
   // extension: the Rust side prepends the reader stylesheet to this
   // script as window.__FRANK_READER_CSS__ and we inject it into the page.
@@ -1037,6 +1090,7 @@
       '<button class="pmr-button" type="button" data-pmr-action="mode" title="Cycle single/double/book modes">Mode</button>',
       '<button class="pmr-button" type="button" data-pmr-action="snap" title="Toggle scroll snap">Snap</button>',
       '<button class="pmr-button" type="button" data-pmr-action="night" title="Cycle night filter strength">Night</button>',
+      '<button class="pmr-button" type="button" data-pmr-action="home" title="Back to your library (h)">⌂</button>',
       '<button class="pmr-button" type="button" data-pmr-action="help" title="Keyboard shortcuts">?</button>',
       '<button class="pmr-button pmr-button-primary" type="button" data-pmr-action="close" title="Turn reader off">Off</button>'
     ].join("");
@@ -1051,6 +1105,7 @@
 
     readerRoot.append(toolbar, scrollEl, help);
     document.documentElement.appendChild(readerRoot);
+    ensureHomeButton();
     document.documentElement.classList.add("pmr-reader-active");
 
     toolbar.addEventListener("click", handleToolbarClick);
@@ -1101,6 +1156,7 @@
     if (action === "mode") cycleMode();
     if (action === "snap") toggleSnap();
     if (action === "night") cycleNightMode();
+    if (action === "home") goHome();
     if (action === "help") toggleHelp();
     if (action === "close") deactivateReader();
   }
@@ -2825,6 +2881,7 @@
           <li><kbd>D</kbd>: cycle Single → Double → Book spread mode</li>
           <li><kbd>S</kbd>: toggle scroll snapping</li>
           <li><kbd>N</kbd>: cycle Night Off → Night 1 → Night 2 → Night 3</li>
+          <li><kbd>H</kbd>: back to your FRANK Scanlation library</li>
           <li><kbd>?</kbd>: show/hide this help</li>
           <li><kbd>Esc</kbd>: close help, then turn reader off</li>
         </ul>
@@ -2836,6 +2893,8 @@
 
   if (window.__PMR_ENABLE_TEST_API__) {
     window.__PMR_TEST_API__ = {
+      HOME_SIGNAL_URL,
+      goHome,
       loadSettings,
       saveSettings,
       getSettings: () => settings,

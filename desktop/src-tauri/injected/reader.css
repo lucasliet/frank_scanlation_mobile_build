@@ -241,6 +241,30 @@ html.pmr-kindle-night-3 .pmr-kindle-page-surface {
   opacity: 1 !important;
 }
 
+#pmr-home-button {
+  position: fixed !important;
+  top: 12px !important;
+  left: 12px !important;
+  z-index: 2147483647 !important;
+  display: flex !important;
+  align-items: center !important;
+  padding: 5px !important;
+  border: 1px solid rgba(255, 255, 255, 0.14) !important;
+  border-radius: 999px !important;
+  background: rgba(14, 14, 14, 0.58) !important;
+  color: #f8f8f8 !important;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.28) !important;
+  backdrop-filter: blur(12px) saturate(125%) !important;
+  -webkit-backdrop-filter: blur(12px) saturate(125%) !important;
+  opacity: 0.62 !important;
+  transition: opacity 160ms ease !important;
+}
+
+#pmr-home-button:hover,
+#pmr-home-button:focus-within {
+  opacity: 0.98 !important;
+}
+
 #pmr-kindle-toolbar {
   position: fixed !important;
   right: 14px !important;
@@ -269,6 +293,7 @@ html.pmr-kindle-night-3 .pmr-kindle-page-surface {
 
 #pmr-reader-root .pmr-button,
 #pmr-reader-activator .pmr-button,
+#pmr-home-button .pmr-button,
 #pmr-kindle-toolbar .pmr-button {
   all: unset !important;
   display: inline-flex !important;
@@ -290,6 +315,8 @@ html.pmr-kindle-night-3 .pmr-kindle-page-surface {
 #pmr-reader-root .pmr-button:focus-visible,
 #pmr-reader-activator .pmr-button:hover,
 #pmr-reader-activator .pmr-button:focus-visible,
+#pmr-home-button .pmr-button:hover,
+#pmr-home-button .pmr-button:focus-visible,
 #pmr-kindle-toolbar .pmr-button:hover,
 #pmr-kindle-toolbar .pmr-button:focus-visible {
   background: rgba(255, 255, 255, 0.2) !important;

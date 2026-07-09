@@ -111,7 +111,7 @@
   main {
     max-width: 1200px;
     margin: 0 auto;
-    padding: 20px 24px 48px;
+    padding: 36px clamp(28px, 5vw, 72px) 64px;
   }
 
   header {
@@ -119,7 +119,7 @@
     align-items: center;
     justify-content: space-between;
     gap: 16px;
-    margin-bottom: 18px;
+    margin-bottom: 28px;
   }
 
   h1 {
@@ -135,7 +135,7 @@
   .add {
     display: flex;
     gap: 10px;
-    margin-bottom: 14px;
+    margin-bottom: 24px;
   }
 
   .add input {

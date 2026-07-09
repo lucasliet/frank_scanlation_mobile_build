@@ -10,15 +10,7 @@
     "frontendDist": "../build"
   },
   "app": {
-    "windows": [
-      {
-        "title": "FRANK Scanlation",
-        "width": 1100,
-        "height": 780,
-        "minWidth": 640,
-        "minHeight": 480
-      }
-    ],
+    "windows": [],
     "security": {
       "csp": null
     }
