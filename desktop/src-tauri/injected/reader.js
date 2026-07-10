@@ -197,6 +197,7 @@
   let kindleForwardingKey = false;
   let kindleActionToggleSeen = false;
   let mangaDexAtHomeCache = null;
+  let mangaDexNavCache = null;
   const isTopWindow = !window.top || window.top === window;
   const scriptStartedAt = Date.now();
 
@@ -2132,9 +2133,14 @@
     try {
       const atHome = await fetchMangaDexAtHomeData(info.chapterId);
       const pageList = mangaDexPagesFromAtHomeData(atHome);
+      // The extension scrapes MangaDex's reader-menu anchors, but in
+      // this app the SPA reader menu is never opened — fall back to the
+      // public API for prev/next when the DOM has nothing.
+      const chapterNav = detectMangaDexChapterNav(info.chapterId)
+        || await fetchMangaDexChapterNavFromApi(info.chapterId);
       return {
         pages: pageList,
-        chapterNav: detectMangaDexChapterNav(info.chapterId),
+        chapterNav,
         targetPageIndex: Math.max(0, Math.min(info.pageNumber - 1, pageList.length - 1)),
         mangaKey: detectMangaDexMangaPreferenceKey(),
         source: "mangadex"
@@ -2193,6 +2199,89 @@
       alt: `MangaDex page ${index + 1}`,
       score: 100
     }));
+  }
+
+  async function fetchMangaDexChapterNavFromApi(chapterId) {
+    if (mangaDexNavCache?.chapterId === chapterId) {
+      return mangaDexNavCache.nav;
+    }
+    let nav = null;
+    try {
+      const chapterResp = await fetch(`https://api.mangadex.org/chapter/${encodeURIComponent(chapterId)}`, {
+        credentials: "omit",
+        headers: { Accept: "application/json" }
+      });
+      if (!chapterResp.ok) {
+        return null;
+      }
+      const chapterData = await chapterResp.json();
+      const attributes = chapterData?.data?.attributes || {};
+      const language = attributes.translatedLanguage || "en";
+      const mangaId = (chapterData?.data?.relationships || []).find((rel) => rel?.type === "manga")?.id;
+      const currentNumber = Number.parseFloat(attributes.chapter);
+      if (!mangaId || !Number.isFinite(currentNumber)) {
+        return null;
+      }
+
+      const chapters = [];
+      let offset = 0;
+      let total = Infinity;
+      for (let page = 0; page < 8 && offset < total; page += 1) {
+        const feedResp = await fetch(
+          `https://api.mangadex.org/manga/${encodeURIComponent(mangaId)}/feed`
+            + `?translatedLanguage%5B%5D=${encodeURIComponent(language)}`
+            + `&order%5Bchapter%5D=asc&limit=500&offset=${offset}`,
+          { credentials: "omit", headers: { Accept: "application/json" } }
+        );
+        if (!feedResp.ok) {
+          break;
+        }
+        const feed = await feedResp.json();
+        const entries = Array.isArray(feed?.data) ? feed.data : [];
+        entries.forEach((entry) => {
+          const number = Number.parseFloat(entry?.attributes?.chapter);
+          if (Number.isFinite(number) && !entry?.attributes?.externalUrl && entry?.id) {
+            chapters.push({ number, id: entry.id });
+          }
+        });
+        total = Number(feed?.total) || 0;
+        offset += entries.length;
+        if (entries.length === 0) {
+          break;
+        }
+      }
+
+      nav = mangaDexNavFromChapterList(chapters, currentNumber, location.origin);
+    } catch (error) {
+      console.warn("Prettify Manga Reader could not load MangaDex chapter nav", error);
+      nav = null;
+    }
+    mangaDexNavCache = { chapterId, nav };
+    return nav;
+  }
+
+  function mangaDexNavFromChapterList(chapters, currentNumber, origin = "https://mangadex.org") {
+    const seen = new Set();
+    const unique = [...chapters]
+      .sort((a, b) => a.number - b.number)
+      .filter((chapter) => {
+        if (seen.has(chapter.number)) {
+          return false;
+        }
+        seen.add(chapter.number);
+        return true;
+      });
+
+    const prev = [...unique].reverse().find((chapter) => chapter.number < currentNumber);
+    const next = unique.find((chapter) => chapter.number > currentNumber);
+    const result = {};
+    if (prev) {
+      result.prev = { url: `${origin}/chapter/${prev.id}`, title: `Previous chapter ${prev.number}`, score: 120 };
+    }
+    if (next) {
+      result.next = { url: `${origin}/chapter/${next.id}`, title: `Next chapter ${next.number}`, score: 120 };
+    }
+    return result.prev || result.next ? result : null;
   }
 
   function detectMangaDexChapterNav(currentChapterId) {
@@ -2859,7 +2948,7 @@
     }
     const autoOpenIntent = readChapterAutoOpenIntent();
     const shouldAutoOpen = shouldConsumeChapterAutoOpenIntent(autoOpenIntent);
-    const chapterUrl = isExplicitChapterUrl(location.href);
+    const chapterUrl = isExplicitChapterUrl(location.href) || isMangaDexReaderPage();
     const readerData = await collectReaderData({ includeEmbedded: shouldAutoOpen || chapterUrl });
     const detected = readerData.pages;
     if (detected.length >= MIN_DETECTED_PAGES) {
@@ -2977,6 +3066,7 @@
       isMangaDexReaderPage,
       kindleNavigationPlanFromKey,
       mangaDexChapterInfoFromUrl,
+      mangaDexNavFromChapterList,
       mangaDexMangaKeyFromTitleUrl,
       mangaDexPagesFromAtHomeData,
       navigationUrlKey,

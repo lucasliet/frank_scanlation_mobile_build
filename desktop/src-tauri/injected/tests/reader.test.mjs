@@ -271,3 +271,32 @@ test("goHome navigates to the rust-intercepted home signal url", () => {
   assert.equal(context.location.href, api.HOME_SIGNAL_URL);
   assert.match(api.HOME_SIGNAL_URL, /home\.frank-scanlation\.internal/);
 });
+
+test("mangadex chapter pages are recognized for auto-open", () => {
+  const { api } = loadApi();
+  assert.equal(
+    api.isMangaDexReaderPage({ href: "https://mangadex.org/chapter/2827a899-0dc3-4841-9869-01ff9d3f0ae2/3" }),
+    true
+  );
+  assert.equal(api.isMangaDexReaderPage({ href: "https://mangadex.org/title/x/y" }), false);
+});
+
+test("mangadex api chapter list resolves prev/next by number", () => {
+  const { api } = loadApi();
+  const chapters = [
+    { number: 1, id: "aaa" },
+    { number: 1, id: "dup" },
+    { number: 2, id: "bbb" },
+    { number: 2.5, id: "ccc" },
+    { number: 3, id: "ddd" }
+  ];
+  const nav = plain(api.mangaDexNavFromChapterList(chapters, 2, "https://mangadex.org"));
+  assert.equal(nav.prev.url, "https://mangadex.org/chapter/aaa");
+  assert.equal(nav.next.url, "https://mangadex.org/chapter/ccc");
+
+  const atStart = plain(api.mangaDexNavFromChapterList(chapters, 1, "https://mangadex.org"));
+  assert.equal(atStart.prev, undefined);
+  assert.equal(atStart.next.url, "https://mangadex.org/chapter/bbb");
+
+  assert.equal(api.mangaDexNavFromChapterList([], 2), null);
+});

@@ -38,6 +38,41 @@ impl Fetcher {
         Ok(response.text().await?)
     }
 
+    /// Fetch text with a per-request User-Agent override. Some APIs
+    /// (MangaDex) reject browser-imitation UAs from non-browser clients
+    /// and require an identifying one instead.
+    pub async fn get_text_as(&self, url: &str, user_agent: &str) -> crate::Result<String> {
+        let response = self
+            .client
+            .get(url)
+            .header(reqwest::header::USER_AGENT, user_agent)
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(response.text().await?)
+    }
+
+    /// Like [`Self::get_bytes`] with a per-request User-Agent override.
+    pub async fn get_bytes_as(
+        &self,
+        url: &str,
+        user_agent: &str,
+    ) -> crate::Result<(Vec<u8>, Option<String>)> {
+        let response = self
+            .client
+            .get(url)
+            .header(reqwest::header::USER_AGENT, user_agent)
+            .send()
+            .await?
+            .error_for_status()?;
+        let content_type = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string);
+        Ok((response.bytes().await?.to_vec(), content_type))
+    }
+
     /// Fetch raw bytes (covers). Returns the body and content type.
     pub async fn get_bytes(&self, url: &str) -> crate::Result<(Vec<u8>, Option<String>)> {
         let response = self.client.get(url).send().await?.error_for_status()?;

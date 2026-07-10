@@ -15,10 +15,10 @@
 #[cfg(target_os = "linux")]
 mod render_env;
 
-use scanlation_core::extract::{extract_site_info, SiteInfo};
+use scanlation_core::extract::SiteInfo;
 use scanlation_core::fetch::{cover_extension, Fetcher};
 use scanlation_core::heuristics::chapter_info_from_url;
-use scanlation_core::{Library, Manga};
+use scanlation_core::{mangadex, resolve_site_info, Library, Manga};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use tauri::webview::PageLoadEvent;
@@ -251,13 +251,21 @@ fn list_manga(state: State<'_, AppState>) -> Result<Vec<Manga>, String> {
 
 #[tauri::command]
 async fn add_manga(state: State<'_, AppState>, url: String) -> Result<Manga, String> {
-    let site_url = normalized_url(&url)?;
+    let mut site_url = normalized_url(&url)?;
 
-    // Best-effort metadata fetch. Cloudflare may refuse the plain HTTP
-    // client; the manga is still added (host as title, no cover) and
-    // remains fully readable through the reader window.
-    let site = match state.fetcher.get_text(site_url.as_str()).await {
-        Ok(html) => Some(extract_site_info(&html, &site_url)),
+    // Best-effort metadata fetch for generic sites — Cloudflare may
+    // refuse the plain HTTP client, but the manga is still added (host
+    // as title, no cover) and remains readable through the webview.
+    // API-backed sites (MangaDex) are all-or-nothing instead: without
+    // the API there is no title, cover, or chapter list at all.
+    let site = match resolve_site_info(&state.fetcher, &site_url).await {
+        Ok((canonical, info)) => {
+            site_url = canonical;
+            Some(info)
+        }
+        Err(e) if mangadex::is_mangadex_host(&site_url) => {
+            return Err(format!("MangaDex lookup failed: {e}"));
+        }
         Err(e) => {
             eprintln!("[frank-scanlation] add: metadata fetch failed for {site_url}: {e}");
             None
@@ -299,11 +307,18 @@ async fn download_cover(
     id: i64,
     cover_url: &str,
 ) -> Result<(), String> {
-    let (bytes, content_type) = state
-        .fetcher
-        .get_bytes(cover_url)
-        .await
-        .map_err(|e| e.to_string())?;
+    let needs_app_ua = Url::parse(cover_url)
+        .map(|u| mangadex::is_mangadex_host(&u))
+        .unwrap_or(false);
+    let (bytes, content_type) = if needs_app_ua {
+        state
+            .fetcher
+            .get_bytes_as(cover_url, mangadex::APP_USER_AGENT)
+            .await
+    } else {
+        state.fetcher.get_bytes(cover_url).await
+    }
+    .map_err(|e| e.to_string())?;
     let ext = cover_extension(content_type.as_deref(), cover_url);
     let dir = covers_dir();
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
@@ -350,14 +365,15 @@ async fn open_manga(
     // "continue" wants the chapter list to find the next unread chapter;
     // fetch it best-effort and fall back to stored URLs.
     let site = if target == "continue" {
-        match state.fetcher.get_text(&manga.url).await {
-            Ok(html) => Url::parse(&manga.url)
-                .ok()
-                .map(|base| extract_site_info(&html, &base)),
-            Err(e) => {
-                eprintln!("[frank-scanlation] continue: site fetch failed: {e}");
-                None
-            }
+        match Url::parse(&manga.url) {
+            Ok(base) => match resolve_site_info(&state.fetcher, &base).await {
+                Ok((_, info)) => Some(info),
+                Err(e) => {
+                    eprintln!("[frank-scanlation] continue: site fetch failed: {e}");
+                    None
+                }
+            },
+            Err(_) => None,
         }
     } else {
         None
@@ -431,6 +447,44 @@ fn handle_main_page_load(window: &tauri::WebviewWindow, url: &Url) {
     let Some(id) = state.current_manga.lock().ok().and_then(|g| *g) else {
         return;
     };
+
+    // MangaDex chapter URLs carry a uuid, not a number — resolve the
+    // number through the API off the main thread, then record.
+    if let Some(chapter_id) = mangadex::chapter_id_from_url(url) {
+        let library = state.library.clone();
+        let fetcher = state.fetcher.clone();
+        let app = app.clone();
+        let url = url.clone();
+        tauri::async_runtime::spawn(async move {
+            // Only record against a manga that actually lives on
+            // MangaDex — mirrors the same_site gate of the generic path.
+            let current_is_mangadex = library
+                .lock()
+                .ok()
+                .and_then(|lib| lib.get(id).ok().flatten())
+                .and_then(|m| Url::parse(&m.url).ok())
+                .is_some_and(|u| mangadex::is_mangadex_host(&u));
+            if !current_is_mangadex {
+                return;
+            }
+            let number = match mangadex::chapter_number(&fetcher, &chapter_id).await {
+                Ok(n) => n,
+                Err(e) => {
+                    eprintln!("[frank-scanlation] mangadex chapter lookup failed: {e}");
+                    return;
+                }
+            };
+            let recorded = library
+                .lock()
+                .map(|lib| lib.record_read(id, url.as_str(), number).is_ok())
+                .unwrap_or(false);
+            if recorded {
+                let _ = app.emit("library-updated", ());
+            }
+        });
+        return;
+    }
+
     let recorded = with_library(&state, |lib| {
         let Some(manga) = lib.get(id)? else {
             return Ok(false);
@@ -472,8 +526,8 @@ async fn check_all_updates(app: &AppHandle, library: &Arc<Mutex<Library>>, fetch
         let Ok(base) = Url::parse(&manga.url) else {
             continue;
         };
-        let html = match fetcher.get_text(&manga.url).await {
-            Ok(html) => html,
+        let site = match resolve_site_info(fetcher, &base).await {
+            Ok((_, info)) => info,
             Err(e) => {
                 eprintln!(
                     "[frank-scanlation] check: fetch failed for {}: {e}",
@@ -482,7 +536,6 @@ async fn check_all_updates(app: &AppHandle, library: &Arc<Mutex<Library>>, fetch
                 continue;
             }
         };
-        let site = extract_site_info(&html, &base);
         let Some(latest) = site.latest_chapter() else {
             continue;
         };

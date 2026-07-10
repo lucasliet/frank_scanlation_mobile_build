@@ -73,6 +73,11 @@ the fence:
   pages/spreads, `D` cycles Single → Double → Book, `N` cycles the night
   filter, `S` toggles scroll snap, `Enter`/`Backspace` jump chapters, `?`
   for help. Mode choice is remembered per manga.
+- **MangaDex support**: the one host-gated exception to the pure
+  heuristics (same stance as the browser extension). MangaDex is an
+  API-driven SPA, so title/cover/chapter-list, reading progress, and
+  prev/next chapter all go through its public API — English by default.
+  Paste a `mangadex.org/title/…` (or chapter) URL like any other site.
 
 ## Where data lives
 
