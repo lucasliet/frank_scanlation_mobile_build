@@ -49,6 +49,9 @@ struct AppState {
     /// Where "home" navigates back to (captured from the main window's
     /// initial app URL).
     home_url: Mutex<Option<Url>>,
+    /// Last URL routed through handle_navigation — lets the SPA URL
+    /// watcher skip what the page-load hook already processed.
+    last_seen_url: Mutex<Option<Url>>,
 }
 
 /// XDG-style config dir holding the library DB and cover cache.
@@ -427,12 +430,31 @@ fn go_home(app: &AppHandle) {
     });
 }
 
-/// Page-load hook for the main window: back on the app UI, remember the
-/// home URL and clear the current manga; on a manga's site, record
-/// reading progress parsed from the URL.
-fn handle_main_page_load(window: &tauri::WebviewWindow, url: &Url) {
-    let app = window.app_handle();
+/// Route a navigation of the main window: back on the app UI, remember
+/// the home URL and clear the current manga; on a manga's site, record
+/// reading progress parsed from the URL. Fed by both the page-load hook
+/// (real navigations) and the SPA URL watcher (pushState navigations,
+/// which never fire a page load).
+fn handle_navigation(app: &AppHandle, url: &Url, from_watcher: bool) {
     let state: State<'_, AppState> = app.state();
+
+    let changed = state
+        .last_seen_url
+        .lock()
+        .map(|mut seen| {
+            let changed = seen.as_ref() != Some(url);
+            if changed {
+                *seen = Some(url.clone());
+            }
+            changed
+        })
+        .unwrap_or(true);
+    // Real page loads always reprocess (authoritative, and re-opening
+    // the same chapter should bump the read timestamp); the watcher
+    // only acts on URLs nothing else has handled.
+    if from_watcher && !changed {
+        return;
+    }
 
     if is_app_origin(url, &state.app_origins) {
         if let Ok(mut home) = state.home_url.lock() {
@@ -564,6 +586,42 @@ async fn check_all_updates(app: &AppHandle, library: &Arc<Mutex<Library>>, fetch
     }
 }
 
+/// SPA sites (MangaDex's Vue app, notably) navigate with pushState, so
+/// no page load ever fires for in-site clicks — but WebKit still
+/// updates the webview URI. While a manga is open, poll it and feed
+/// changes through the same recording logic as real navigations.
+fn spawn_spa_url_watcher(app: AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            let watching = app
+                .state::<AppState>()
+                .current_manga
+                .lock()
+                .ok()
+                .and_then(|guard| *guard)
+                .is_some();
+            if !watching {
+                continue;
+            }
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            let handle = app.clone();
+            if app
+                .run_on_main_thread(move || {
+                    let url = handle.get_webview_window("main").and_then(|w| w.url().ok());
+                    let _ = tx.send(url);
+                })
+                .is_err()
+            {
+                continue;
+            }
+            if let Ok(Some(url)) = rx.await {
+                handle_navigation(&app, &url, true);
+            }
+        }
+    });
+}
+
 fn spawn_update_checker(app: AppHandle, library: Arc<Mutex<Library>>, fetcher: Fetcher) {
     tauri::async_runtime::spawn(async move {
         tokio::time::sleep(FIRST_CHECK_DELAY).await;
@@ -645,6 +703,7 @@ pub fn run() {
         app_origins: origins.clone(),
         current_manga: Mutex::new(None),
         home_url: Mutex::new(None),
+        last_seen_url: Mutex::new(None),
     };
 
     tauri::Builder::default()
@@ -681,7 +740,7 @@ pub fn run() {
                     })
                     .on_page_load(|window, payload| {
                         if matches!(payload.event(), PageLoadEvent::Finished) {
-                            handle_main_page_load(&window, payload.url());
+                            handle_navigation(window.app_handle(), payload.url(), false);
                         }
                     })
                     .build()?;
@@ -693,6 +752,7 @@ pub fn run() {
                 }
             }
 
+            spawn_spa_url_watcher(app.handle().clone());
             spawn_update_checker(app.handle().clone(), library, fetcher);
             Ok(())
         })
