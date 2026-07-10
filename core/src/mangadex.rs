@@ -19,8 +19,11 @@ use std::collections::HashSet;
 use std::sync::OnceLock;
 use url::Url;
 
-pub const APP_USER_AGENT: &str =
-    "FrankScanlation/0.1.0 (https://github.com/akitaonrails/frank_scanlation)";
+pub const APP_USER_AGENT: &str = concat!(
+    "FrankScanlation/",
+    env!("CARGO_PKG_VERSION"),
+    " (https://github.com/akitaonrails/frank_scanlation)"
+);
 pub const DEFAULT_LANGUAGE: &str = "en";
 
 const API_BASE: &str = "https://api.mangadex.org";
