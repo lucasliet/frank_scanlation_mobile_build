@@ -457,3 +457,26 @@ html.pmr-kindle-night-3 .pmr-kindle-page-surface {
     gap: 0 !important;
   }
 }
+
+/* Touch-specific reader ergonomics. Activated only by pointer capability,
+ * never by layout — so the desktop reader keeps its current behaviour. */
+@media (pointer: coarse) {
+  #pmr-reader-root .pmr-button,
+  #pmr-reader-activator .pmr-button,
+  #pmr-home-button .pmr-button,
+  #pmr-kindle-toolbar .pmr-button {
+    min-height: 44px !important;
+    min-width: 44px !important;
+    padding: 0 14px !important;
+  }
+
+  #pmr-reader-root .pmr-scroll {
+    touch-action: manipulation !important;
+    overscroll-behavior: contain !important;
+  }
+
+  #pmr-reader-root .pmr-chapter-link {
+    min-height: 44px !important;
+    padding: 0 22px !important;
+  }
+}

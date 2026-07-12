@@ -79,3 +79,35 @@ input[type="text"] {
 input:focus {
   border-color: var(--accent);
 }
+
+/* ---------- Mobile-only adjustments ----------
+ * Guarded so desktop never picks them up:
+ *   html.mobile-layout is added by +layout.svelte only when the Tauri
+ *   platform is Android; @media (pointer: coarse) covers the touch
+ *   capability without touching layout on desktop pointers.
+ */
+
+html.mobile-layout {
+  padding-top: env(safe-area-inset-top);
+  padding-bottom: env(safe-area-inset-bottom);
+  padding-left: env(safe-area-inset-left);
+  padding-right: env(safe-area-inset-right);
+}
+
+html.mobile-layout body {
+  -webkit-tap-highlight-color: transparent;
+  overscroll-behavior: contain;
+}
+
+@media (pointer: coarse) {
+  html.mobile-layout button {
+    min-height: 44px;
+    min-width: 44px;
+  }
+
+  html.mobile-layout input[type="url"],
+  html.mobile-layout input[type="text"] {
+    min-height: 44px;
+    font-size: 16px;
+  }
+}

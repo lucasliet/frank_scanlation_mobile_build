@@ -10,12 +10,15 @@
     "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
     "test": "vitest run && node --test src-tauri/injected/tests/reader.test.mjs",
     "test:watch": "vitest",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "mobile:dev": "tauri android dev",
+    "mobile:build": "tauri android build --apk"
   },
   "license": "MIT",
   "dependencies": {
     "@tauri-apps/api": "^2",
-    "@tauri-apps/plugin-opener": "^2"
+    "@tauri-apps/plugin-opener": "^2",
+    "@tauri-apps/plugin-os": "^2"
   },
   "devDependencies": {
     "@sveltejs/adapter-static": "^3.0.6",

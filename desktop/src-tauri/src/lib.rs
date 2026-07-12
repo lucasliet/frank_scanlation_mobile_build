@@ -19,7 +19,7 @@ use scanlation_core::extract::SiteInfo;
 use scanlation_core::fetch::{cover_extension, Fetcher};
 use scanlation_core::heuristics::chapter_info_from_url;
 use scanlation_core::{mangadex, resolve_site_info, Library, Manga};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use tauri::webview::PageLoadEvent;
 use tauri::{AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder};
@@ -37,9 +37,28 @@ const FIRST_CHECK_DELAY: std::time::Duration = std::time::Duration::from_secs(5)
 /// back in — the only signal a remote page can send without IPC.
 const HOME_SIGNAL_HOST: &str = "home.frank-scanlation.internal";
 
+struct StoragePaths {
+    db_path: PathBuf,
+    covers_dir: PathBuf,
+}
+
+impl StoragePaths {
+    fn new(base: PathBuf) -> Self {
+        Self {
+            db_path: base.join("library.db"),
+            covers_dir: base.join("covers"),
+        }
+    }
+
+    fn cover_path(&self, id: i64, ext: &str) -> PathBuf {
+        self.covers_dir.join(format!("{id}.{ext}"))
+    }
+}
+
 struct AppState {
     library: Arc<Mutex<Library>>,
     fetcher: Fetcher,
+    storage_paths: StoragePaths,
     /// Origins that are the app's own UI (tauri://localhost and the dev
     /// server). The injected script does nothing on these.
     app_origins: Vec<String>,
@@ -69,8 +88,11 @@ fn config_dir() -> PathBuf {
     std::env::temp_dir().join("frank-scanlation")
 }
 
-fn covers_dir() -> PathBuf {
-    config_dir().join("covers")
+fn path_extension(path: &Path) -> String {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .unwrap_or("jpg")
+        .to_lowercase()
 }
 
 /// The script injected into every page of a reader window: the reader
@@ -323,9 +345,8 @@ async fn download_cover(
     }
     .map_err(|e| e.to_string())?;
     let ext = cover_extension(content_type.as_deref(), cover_url);
-    let dir = covers_dir();
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    let path = dir.join(format!("{id}.{ext}"));
+    std::fs::create_dir_all(&state.storage_paths.covers_dir).map_err(|e| e.to_string())?;
+    let path = state.storage_paths.cover_path(id, ext);
     std::fs::write(&path, bytes).map_err(|e| e.to_string())?;
     with_library(state, |lib| lib.set_cover(id, &path.to_string_lossy()))
 }
@@ -335,7 +356,7 @@ fn remove_manga(state: State<'_, AppState>, id: i64) -> Result<(), String> {
     let manga = with_library(&state, |lib| lib.get(id))?;
     with_library(&state, |lib| lib.remove(id))?;
     if let Some(cover) = manga.and_then(|m| m.cover_path) {
-        let _ = std::fs::remove_file(cover);
+        let _ = std::fs::remove_file(PathBuf::from(cover));
     }
     Ok(())
 }
@@ -345,13 +366,13 @@ fn get_cover(state: State<'_, AppState>, id: i64) -> Result<Option<String>, Stri
     let Some(manga) = with_library(&state, |lib| lib.get(id))? else {
         return Ok(None);
     };
-    let Some(path) = manga.cover_path else {
+    let Some(path) = manga.cover_path.map(PathBuf::from) else {
         return Ok(None);
     };
     let Ok(bytes) = std::fs::read(&path) else {
         return Ok(None);
     };
-    let ext = path.rsplit('.').next().unwrap_or("jpg").to_lowercase();
+    let ext = path_extension(&path);
     Ok(Some(data_url(&bytes, &ext)))
 }
 
@@ -634,83 +655,96 @@ fn spawn_update_checker(app: AppHandle, library: Arc<Mutex<Library>>, fetcher: F
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    // Linux-only: pick a WebKit render mode based on the actual
-    // hardware + display server. Order of precedence (highest first):
-    //   1. FRANK_SCANLATION_RENDER_MODE env var
-    //   2. <config_dir>/render.conf `mode = ...`
-    //   3. Crash recovery (last run left a marker behind) → Safe
-    //   4. Auto detect from GPU vendor + WAYLAND_DISPLAY
-    // The decision is written to <config_dir>/render-state.log.
-    #[cfg(target_os = "linux")]
-    {
-        use render_env::{
-            apply_mode, create_recovery_marker, decide_mode, detect_display_server_from_env,
-            detect_gpu_vendor_from_sysfs, is_recovery_needed, resolve_user_override,
-            write_state_log, ModeOverride,
-        };
-        let cfg_dir = config_dir();
-        let env_override = std::env::var("FRANK_SCANLATION_RENDER_MODE").ok();
-        let user_override = resolve_user_override(env_override.as_deref(), &cfg_dir);
-        let recovery = is_recovery_needed(&cfg_dir);
-        let explicit = match user_override {
-            Some(ModeOverride::Explicit(m)) => Some(m),
-            _ => None,
-        };
-        let display = detect_display_server_from_env();
-        let gpu = detect_gpu_vendor_from_sysfs();
-        let (mode, reason) = decide_mode(explicit, recovery, display, gpu);
-        eprintln!(
-            "[frank-scanlation] render mode: {} ({}; display={:?} gpu={:?}{}{})",
-            mode.slug(),
-            reason,
-            display,
-            gpu,
-            if user_override.is_some() {
-                " override=yes"
-            } else {
-                ""
-            },
-            if recovery { " recovery=yes" } else { "" },
-        );
-        // SAFETY: this is the binary's first user-code call after main;
-        // nothing has spawned a thread yet, so the env table has no
-        // concurrent reader.
-        unsafe { apply_mode(mode) };
-        create_recovery_marker(&cfg_dir);
-        write_state_log(
-            &cfg_dir,
-            mode,
-            reason,
-            display,
-            gpu,
-            user_override.is_some(),
-            recovery,
-        );
-    }
-
-    let db_path = config_dir().join("library.db");
-    let library = Library::open(&db_path)
-        .unwrap_or_else(|e| panic!("cannot open library at {}: {e}", db_path.display()));
-    let library = Arc::new(Mutex::new(library));
-    let fetcher = Fetcher::new();
-
     let context: tauri::Context<tauri::Wry> = tauri::generate_context!();
     let origins = app_origins(context.config().build.dev_url.as_ref());
-
-    let state = AppState {
-        library: library.clone(),
-        fetcher: fetcher.clone(),
-        app_origins: origins.clone(),
-        current_manga: Mutex::new(None),
-        home_url: Mutex::new(None),
-        last_seen_url: Mutex::new(None),
-    };
 
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_opener::init())
-        .manage(state)
+        .plugin(tauri_plugin_os::init())
         .setup(move |app| {
+            #[cfg(target_os = "android")]
+            let storage_base = app
+                .path()
+                .app_data_dir()
+                .expect("cannot resolve app data dir");
+            #[cfg(not(target_os = "android"))]
+            let storage_base = config_dir();
+            let storage_paths = StoragePaths::new(storage_base);
+
+            // Linux-only: pick a WebKit render mode based on the actual
+            // hardware + display server. Order of precedence (highest first):
+            //   1. FRANK_SCANLATION_RENDER_MODE env var
+            //   2. <config_dir>/render.conf `mode = ...`
+            //   3. Crash recovery (last run left a marker behind) → Safe
+            //   4. Auto detect from GPU vendor + WAYLAND_DISPLAY
+            // The decision is written to <config_dir>/render-state.log.
+            #[cfg(target_os = "linux")]
+            {
+                use render_env::{
+                    apply_mode, create_recovery_marker, decide_mode,
+                    detect_display_server_from_env, detect_gpu_vendor_from_sysfs,
+                    is_recovery_needed, resolve_user_override, write_state_log, ModeOverride,
+                };
+                let cfg_dir = config_dir();
+                let env_override = std::env::var("FRANK_SCANLATION_RENDER_MODE").ok();
+                let user_override = resolve_user_override(env_override.as_deref(), &cfg_dir);
+                let recovery = is_recovery_needed(&cfg_dir);
+                let explicit = match user_override {
+                    Some(ModeOverride::Explicit(m)) => Some(m),
+                    _ => None,
+                };
+                let display = detect_display_server_from_env();
+                let gpu = detect_gpu_vendor_from_sysfs();
+                let (mode, reason) = decide_mode(explicit, recovery, display, gpu);
+                eprintln!(
+                    "[frank-scanlation] render mode: {} ({}; display={:?} gpu={:?}{}{})",
+                    mode.slug(),
+                    reason,
+                    display,
+                    gpu,
+                    if user_override.is_some() {
+                        " override=yes"
+                    } else {
+                        ""
+                    },
+                    if recovery { " recovery=yes" } else { "" },
+                );
+                // SAFETY: this runs during Tauri setup before user code has
+                // spawned app-managed threads, so the env table has no
+                // concurrent reader.
+                unsafe { apply_mode(mode) };
+                create_recovery_marker(&cfg_dir);
+                write_state_log(
+                    &cfg_dir,
+                    mode,
+                    reason,
+                    display,
+                    gpu,
+                    user_override.is_some(),
+                    recovery,
+                );
+            }
+
+            let library = Library::open(&storage_paths.db_path).unwrap_or_else(|e| {
+                panic!(
+                    "cannot open library at {}: {e}",
+                    storage_paths.db_path.display()
+                )
+            });
+            let library = Arc::new(Mutex::new(library));
+            let fetcher = Fetcher::new();
+            let state = AppState {
+                library: library.clone(),
+                fetcher: fetcher.clone(),
+                storage_paths,
+                app_origins: origins.clone(),
+                current_manga: Mutex::new(None),
+                home_url: Mutex::new(None),
+                last_seen_url: Mutex::new(None),
+            };
+            app.manage(state);
+
             // The single main window is created here (not in
             // tauri.conf.json) because it needs the injected reader
             // script and the navigation/page-load hooks — it shows the
@@ -971,5 +1005,40 @@ mod tests {
     fn host_title_strips_www() {
         let url = Url::parse("https://www.zom-100.example/").unwrap();
         assert_eq!(host_title(&url), "zom-100.example");
+    }
+
+    #[test]
+    fn storage_paths_lays_out_db_and_covers_under_base() {
+        let paths = StoragePaths::new(PathBuf::from("/data/app"));
+
+        assert_eq!(paths.db_path, PathBuf::from("/data/app/library.db"));
+        assert_eq!(paths.covers_dir, PathBuf::from("/data/app/covers"));
+    }
+
+    #[test]
+    fn storage_paths_cover_path_combines_id_and_extension() {
+        let paths = StoragePaths::new(PathBuf::from("/data/app"));
+
+        assert_eq!(
+            paths.cover_path(42, "jpg"),
+            PathBuf::from("/data/app/covers/42.jpg")
+        );
+        assert_eq!(
+            paths.cover_path(7, "png"),
+            PathBuf::from("/data/app/covers/7.png")
+        );
+    }
+
+    #[test]
+    fn path_extension_lowercases_known_extensions() {
+        assert_eq!(path_extension(Path::new("/covers/1.jpg")), "jpg");
+        assert_eq!(path_extension(Path::new("/covers/1.PNG")), "png");
+        assert_eq!(path_extension(Path::new("/covers/1.WebP")), "webp");
+    }
+
+    #[test]
+    fn path_extension_falls_back_to_jpg_when_missing() {
+        assert_eq!(path_extension(Path::new("/covers/coverless")), "jpg");
+        assert_eq!(path_extension(Path::new("/covers/")), "jpg");
     }
 }
