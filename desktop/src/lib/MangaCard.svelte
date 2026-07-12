@@ -167,4 +167,23 @@
     padding: 5px 9px;
     font-size: 0.8rem;
   }
+
+  @media (max-width: 640px) {
+    .meta {
+      padding: 12px;
+      gap: 8px;
+    }
+
+    h2 {
+      font-size: 1rem;
+    }
+
+    .actions button.primary {
+      flex: 1 0 100%;
+    }
+
+    .actions button:not(.primary) {
+      flex: 1 1 0;
+    }
+  }
 </style>

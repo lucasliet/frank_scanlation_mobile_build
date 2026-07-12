@@ -11,8 +11,8 @@ const readerCss = readFileSync(
 );
 
 describe("mobile CSS guards do not leak into desktop", () => {
-  test("app.css gates safe-area rules under html.mobile-layout", () => {
-    expect(appCss).toContain("html.mobile-layout");
+  test("app.css applies safe-area rules globally", () => {
+    expect(appCss).toContain("html,\nbody");
     expect(appCss).toContain("env(safe-area-inset-top)");
   });
 

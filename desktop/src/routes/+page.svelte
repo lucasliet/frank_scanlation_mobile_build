@@ -171,4 +171,39 @@
     grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
     gap: 16px;
   }
+
+  @media (max-width: 640px) {
+    main {
+      padding: 20px 16px calc(48px + env(safe-area-inset-bottom));
+    }
+
+    header {
+      flex-direction: column;
+      align-items: stretch;
+      gap: 12px;
+      margin-bottom: 20px;
+    }
+
+    header button {
+      width: 100%;
+    }
+
+    h1 {
+      font-size: 1.25rem;
+      text-align: center;
+    }
+
+    .add {
+      flex-direction: column;
+    }
+
+    .add button {
+      width: 100%;
+    }
+
+    .grid {
+      grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+      gap: 12px;
+    }
+  }
 </style>
